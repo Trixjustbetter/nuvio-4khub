@@ -199,7 +199,12 @@
 
     var toMeta = function (data) {
       var dateStr = data.release_date || data.first_air_date || '';
-      var meta = { title: data.title || data.name || '', year: parseInt(dateStr.substring(0, 4), 10) || 0 };
+      var meta = {
+        title: data.title || data.name || '',
+        year: parseInt(dateStr.substring(0, 4), 10) || 0,
+        tmdbId: String(data.id || ''),
+        imdbId: ''
+      };
       if (!meta.title) throw new Error('TMDB lookup returned no title for id ' + tmdbId);
       cacheSet(cacheKey, meta, 24 * 60 * 60 * 1000);
       return meta;
@@ -214,12 +219,19 @@
         var bucket = res[t + '_results'] || [];
         if (!bucket.length) bucket = res.movie_results || res.tv_results || [];
         if (!bucket.length) throw new Error('TMDB find failed for IMDb id ' + idStr);
-        return toMeta(bucket[0]);
+        var meta = toMeta(bucket[0]);
+        meta.imdbId = idStr;
+        return meta;
       });
     }
 
-    var url = 'https://api.themoviedb.org/3/' + t + '/' + idStr + '?api_key=' + TMDB_API_KEY;
-    return httpGet(url, null, true).then(toMeta);
+    var url = 'https://api.themoviedb.org/3/' + t + '/' + idStr +
+              '?api_key=' + TMDB_API_KEY + '&append_to_response=external_ids';
+    return httpGet(url, null, true).then(function (data) {
+      var meta = toMeta(data);
+      meta.imdbId = (data.external_ids && data.external_ids.imdb_id) || '';
+      return meta;
+    });
   }
 
   // ------------------------- search -------------------------
@@ -535,6 +547,103 @@
     }, Promise.resolve([]));
   }
 
+  // ------------------------- videasy fallback -------------------------
+  var VIDEASY_SERVERS = [
+    { name: 'Yoru',   path: 'cdn',               moviesOnly: true },
+    { name: 'Neon',   path: 'myflixerzupcloud' },
+    { name: 'Sage',   path: '1movies' },
+    { name: 'Cypher', path: 'moviebox' },
+    { name: 'Ghost',  path: 'primesrcme' },
+    { name: 'Vyse',   path: 'hdmovie' },
+    { name: 'Fade',   path: 'hdmovie', lang: 'hindi' },
+    { name: 'Omen',   path: 'onionplay' }
+  ];
+
+  function postJson(url, bodyObj) {
+    return fetch(url, {
+      method: 'POST',
+      headers: Object.assign({}, DEFAULT_HEADERS, { 'Content-Type': 'application/json' }),
+      body: JSON.stringify(bodyObj)
+    }).then(function (res) { return res.text(); }).then(function (t) { return JSON.parse(t); });
+  }
+
+  function qualityFromUrl(url) {
+    var m = /(\d{3,4})p/i.exec(String(url));
+    if (m) return m[1] + 'p';
+    if (/1080|1920/.test(url)) return '1080p';
+    if (/720|1280/.test(url)) return '720p';
+    if (/480|854/.test(url)) return '480p';
+    return '';
+  }
+
+  function fetchVideasyServer(srv, meta, mediaType, season, episode) {
+    if (mediaType === 'tv' && srv.moviesOnly) return Promise.resolve([]);
+    var doubleTitle = encodeURIComponent(encodeURIComponent(meta.title).replace(/\+/g, '%20'));
+    var params = {
+      title: doubleTitle,
+      mediaType: mediaType,
+      year: meta.year,
+      tmdbId: meta.tmdbId,
+      imdbId: meta.imdbId
+    };
+    if (srv.lang) params.language = srv.lang;
+    if (mediaType === 'tv' && season && episode) {
+      params.seasonId = season;
+      params.episodeId = episode;
+    }
+    var qs = Object.keys(params).map(function (k) { return k + '=' + encodeURIComponent(params[k]); }).join('&');
+    var url = 'https://api.videasy.net/' + srv.path + '/sources-with-title?' + qs;
+
+    return httpGet(url).then(function (encrypted) {
+      if (!encrypted || !String(encrypted).trim()) throw new Error('empty response');
+      return postJson('https://enc-dec.app/api/dec-videasy', { text: encrypted, id: Number(meta.tmdbId) });
+    }).then(function (decrypted) {
+      var out = [];
+      var sources = (decrypted && decrypted.result && decrypted.result.sources) || [];
+      sources.forEach(function (src, i) {
+        if (!src.url) return;
+        var q = src.quality || qualityFromUrl(src.url) ||
+                (src.url.indexOf('.m3u8') !== -1 ? 'Auto' : 'Stream');
+        var parts = [];
+        parts.push(q);
+        if (src.language) parts.push(src.language);
+        out.push({
+          name: BRAND + ' #' + (91 + i) + ' - ' + parts.join(' ') + ' - VideoEasy - ' + srv.name,
+          title: (meta.title || '') + (mediaType === 'tv' && season && episode
+            ? ' S' + pad2(season) + 'E' + pad2(episode) : '') +
+            (src.url.indexOf('.m3u8') !== -1 ? ' - HLS' : ''),
+          url: src.url,
+          quality: q,
+          headers: {
+            'User-Agent': DEFAULT_HEADERS['User-Agent'],
+            'Referer': 'https://api.videasy.net/',
+            'Origin': 'https://player.videasy.net'
+          }
+        });
+      });
+      log('videasy[' + srv.name + '] -> ' + out.length + ' stream(s)');
+      return out;
+    }).catch(function (e) {
+      log('videasy[' + srv.name + '] failed:', e && e.message);
+      return [];
+    });
+  }
+
+  function fetchVideasyFallback(meta, mediaType, season, episode) {
+    return Promise.all(VIDEASY_SERVERS.map(function (srv) {
+      return fetchVideasyServer(srv, meta, mediaType, season, episode);
+    })).then(function (lists) {
+      var merged = [], seen = [];
+      lists.forEach(function (list) {
+        list.forEach(function (s) {
+          if (seen.indexOf(s.url) === -1) { seen.push(s.url); merged.push(s); }
+        });
+      });
+      log('videasy total: ' + merged.length);
+      return merged;
+    });
+  }
+
   // ------------------------- main entry -------------------------
   function getStreamsByMeta(title, year, mediaType, season, episode) {
     var cacheKey = 'streams_' + normalizeTitle(title) + '_' + (year || 0) + '_' + mediaType +
@@ -586,7 +695,17 @@
     return getTmdbDetails(tmdbId, mt).then(function (meta) {
       log('tmdb meta:', JSON.stringify(meta));
       if (!meta || !meta.title) throw new Error('TMDB lookup failed for id ' + tmdbId);
-      return getStreamsByMeta(meta.title, meta.year, mt, season, episode);
+      return getStreamsByMeta(meta.title, meta.year, mt, season, episode)
+        .catch(function (e) {
+          log('4khdhub pipeline failed:', e && e.message);
+          return [];
+        })
+        .then(function (streams) {
+          if (streams.length) return streams;
+          // All 4KHDHub mirrors dead or no page match — VideoEasy fallback
+          log('falling back to VideoEasy servers');
+          return fetchVideasyFallback(meta, mt, season, episode);
+        });
     }).catch(function (e) {
       log('FATAL in getStreams:', e && e.message);
       throw e;
