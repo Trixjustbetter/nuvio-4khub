@@ -10,6 +10,7 @@ const PORT = process.env.PORT || 3000;
 // Short-lived pipeline cache so /play (which follows /streams in the same UI
 // flow) answers instantly instead of re-scraping while the player waits.
 const resolveCache = {};
+function cacheSet(k, v, ttl) { resolveCache[k] = { v: v, exp: Date.now() + ttl }; }
 function cacheGet(k) {
   const e = resolveCache[k];
   if (!e || Date.now() > e.exp) { delete resolveCache[k]; return null; }
