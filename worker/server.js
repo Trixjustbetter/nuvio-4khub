@@ -267,31 +267,37 @@ async function collectStreams(params, opts) {
   const limited = items.slice(0, 12);
 
   const streams = [];
-  for (const item of limited) {
-    let candidates = [];
-    for (const link of item.links) {
+  // Resolve every item's drive links in PARALLEL — sequential chaining made
+  // listing take 10s+; parallel keeps it to roughly the slowest single chain.
+  const resolvedLists = await Promise.all(limited.map(async (item) => {
+    const perLink = await Promise.all(item.links.map(async (link) => {
       try {
         if (/hubdrive\./i.test(link)) {
           const hp = await getText(link, BASE_URL);
           const nested = /href="(https?:\/\/[^"]*hubcloud[^"]*)"/i.exec(hp);
-          if (!nested) continue;
+          if (!nested) return [];
           const r = await resolveMirrorChain(nested[1]);
-          candidates.push(...r.links);
+          return r.links;
         } else if (/hubcloud\./i.test(link)) {
           const r = await resolveMirrorChain(link);
-          candidates.push(...r.links);
+          return r.links;
         } else if (/pixeldrain\.com\/u\//i.test(link)) {
           const id = link.match(/u\/([A-Za-z0-9]+)/)[1];
-          candidates.push('https://pixeldrain.com/api/file/' + id + '?download');
+          return ['https://pixeldrain.com/api/file/' + id + '?download'];
         }
       } catch (e) { /* skip */ }
-    }
-    candidates = [...new Set(candidates)].sort((a, b) => rank(a) - rank(b));
+      return [];
+    }));
+    return [...new Set([].concat(...perLink))].sort((a, b) => rank(a) - rank(b));
+  }));
+
+  limited.forEach((item, i) => {
+    const candidates = resolvedLists[i];
 
     // NOTE: no pre-validation here — every probe request burns these mirrors'
     // tiny per-file quotas before the actual play. /play proxies candidates
     // directly instead; its attempt IS the validity check.
-    if (!candidates.length) continue;
+    if (!candidates.length) return;
 
     const tier = tierOf(item.label + ' ' + item.fileName) || 'HD';
     streams.push({
@@ -302,7 +308,7 @@ async function collectStreams(params, opts) {
       candidates: candidates.slice(0, 5),
       referer: best.url
     });
-  }
+  });
   const out = { streams, meta };
   const distinct = new Set();
   streams.forEach(s => { distinct.add(s.url); (s.candidates || []).forEach(c => distinct.add(c)); });
@@ -348,35 +354,59 @@ async function handlePlay(res, params, rangeHeader) {
     const tryUrls = [...new Set(pool.filter(Boolean))];
     const referer = entry.referer;
 
-    for (const url of tryUrls) {
-      try {
-        const h = { 'User-Agent': UA };
-        if (referer) h['Referer'] = referer;
-        if (rangeHeader) h['Range'] = rangeHeader;
-        const upstream = await fetch(url, { headers: h });
-        const ct = upstream.headers.get('content-type') || '';
-        if (upstream.status >= 400 || /text\/html/i.test(ct)) {
-          dlog({ kind: 'skip', tag: tag, status: upstream.status, ct: ct.slice(0, 30), url: url.slice(0, 80) });
-          continue;
+    // RACE every mirror at once instead of skipping dead ones sequentially —
+    // playback starts as fast as the fastest LIVE mirror answers.
+    const ac = new AbortController();
+    const killTimer = setTimeout(() => ac.abort(), 8000);
+    let winner = null;
+    try {
+      const results = await Promise.all(tryUrls.map(async (url) => {
+        try {
+          const h = { 'User-Agent': UA };
+          if (referer) h['Referer'] = referer;
+          if (rangeHeader) h['Range'] = rangeHeader;
+          const upstream = await fetch(url, { headers: h, signal: ac.signal });
+          const ct = upstream.headers.get('content-type') || '';
+          if (upstream.status >= 400 || /text\/html/i.test(ct)) {
+            dlog({ kind: 'skip', tag: tag, status: upstream.status, ct: ct.slice(0, 30), url: url.slice(0, 80) });
+            upstream.body && upstream.body.cancel && upstream.body.cancel().catch(() => {});
+            return null;
+          }
+          if (!winner) {
+            winner = { url: url, upstream: upstream, ct: ct };
+          } else {
+            // another mirror won the race — release this connection
+            upstream.body && upstream.body.cancel && upstream.body.cancel().catch(() => {});
+          }
+          return url;
+        } catch (e) {
+          if (!/abort/i.test(String((e && e.message) || e))) {
+            dlog({ kind: 'err', msg: String((e && e.message) || e).slice(0, 80) });
+          }
+          return null;
         }
-
-        const headers = {};
-        ['content-type', 'content-length', 'content-disposition', 'accept-ranges', 'content-range'].forEach(hh => {
-          const v = upstream.headers.get(hh);
-          if (v) headers[hh] = v;
-        });
-        headers['Access-Control-Allow-Origin'] = '*';
-        res.writeHead(upstream.status, headers);
-        dlog({ kind: 'pipe', tag: tag, status: upstream.status, ct: ct.slice(0, 40), url: url.slice(0, 80), range: rangeHeader || null });
-        const { Readable } = require('stream');
-        Readable.fromWeb(upstream.body).pipe(res);
-        return true;
-      } catch (e) {
-        dlog({ kind: 'err', msg: String((e && e.message) || e).slice(0, 80) });
-      }
+      }));
+      dlog({ kind: 'race', tag: tag, total: tryUrls.length, alive: results.filter(Boolean).length });
+    } finally {
+      clearTimeout(killTimer);
     }
-    dlog({ kind: 'dead', tag: tag, tried: tryUrls.length });
-    return false;
+
+    if (!winner) {
+      dlog({ kind: 'dead', tag: tag, tried: tryUrls.length });
+      return false;
+    }
+
+    const headers = {};
+    ['content-type', 'content-length', 'content-disposition', 'accept-ranges', 'content-range'].forEach(hh => {
+      const v = winner.upstream.headers.get(hh);
+      if (v) headers[hh] = v;
+    });
+    headers['Access-Control-Allow-Origin'] = '*';
+    res.writeHead(winner.upstream.status, headers);
+    dlog({ kind: 'pipe', tag: tag, status: winner.upstream.status, ct: String(winner.ct).slice(0, 40), url: winner.url.slice(0, 80), range: rangeHeader || null });
+    const { Readable } = require('stream');
+    Readable.fromWeb(winner.upstream.body).pipe(res);
+    return true;
   };
 
   let done = await attempt((await collectStreams(params)).streams, 'cached');
