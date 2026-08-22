@@ -1,0 +1,15 @@
+name: Keep resolver awake
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # every 10 min — prevents Render free-tier sleep
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping resolver
+        run: |
+          echo "ping $(date -u +%H:%M:%S)Z"
+          curl -sS -m 30 https://nuvio-4khub.onrender.com/
