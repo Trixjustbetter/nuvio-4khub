@@ -346,6 +346,55 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const p = url.searchParams;
   try {
+    // ---------- Stremio addon protocol ----------
+    if (url.pathname === '/manifest.json') {
+      return jres(res, {
+        id: 'com.trixplay.resolver',
+        version: '1.0.0',
+        name: BRAND,
+        description: '4KHDHub streams resolved server-side with live mirror failover.',
+        resources: [{ name: 'stream', types: ['movie', 'series'], idPrefixes: ['tt', 'tmdb'] }],
+        types: ['movie', 'series'],
+        catalogs: [],
+        idPrefixes: ['tt', 'tmdb']
+      });
+    }
+
+    let sm;
+    if ((sm = /^\/stream\/(movie|series)\/([^/]+?)\.json$/.exec(url.pathname))) {
+      const type = sm[1];
+      const parts = decodeURIComponent(sm[2]).split(':');
+      const rawId = parts[0];
+      const season = parts[1] || 0;
+      const episode = parts[2] || 0;
+
+      const isImdb = /^tt\d+/i.test(rawId);
+      const pmap = {
+        type: type,
+        imdb: isImdb ? rawId : '',
+        tmdb: isImdb ? '' : rawId.replace(/^tmdb:/i, ''),
+        s: String(season),
+        e: String(episode)
+      };
+      const shim = { get: k => (pmap[k] !== undefined ? String(pmap[k]) : null) };
+
+      const out = await collectStreams(shim);
+      const playBase = 'https://' + (req.headers.host || 'nuvio-4khub.onrender.com') +
+                       '/play?type=' + type +
+                       '&imdb=' + encodeURIComponent(pmap.imdb) +
+                       '&tmdb=' + encodeURIComponent(pmap.tmdb) +
+                       '&s=' + season + '&e=' + episode;
+      const streams = out.streams.map(function (s, i) {
+        return {
+          name: s.name,
+          title: s.title + (s.quality ? '\n' + s.quality : ''),
+          url: playBase + '&idx=' + i,
+          behaviorHints: { notWebReady: true }
+        };
+      });
+      return jres(res, { streams: streams, sources: undefined });
+    }
+
     if (url.pathname === '/streams') {
       const out = await handleStreams(p);
       jres(res, out);
