@@ -1,12 +1,12 @@
 {
   "name": "Brody's Providers",
-  "version": "1.2.2",
+  "version": "1.2.5",
   "scrapers": [
     {
       "id": "4khdhub",
       "name": "4KHDHub",
       "description": "4K/1080p movies & series from 4khdhub.one via HubCloud/HubDrive direct links",
-      "version": "1.2.2",
+      "version": "1.2.5",
       "author": "brody",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/4khdhub.js",

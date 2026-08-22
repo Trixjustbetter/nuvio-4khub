@@ -7,6 +7,16 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const BRAND = 'TrixPlay';
 const PORT = process.env.PORT || 3000;
 
+// Short-lived pipeline cache so /play (which follows /streams in the same UI
+// flow) answers instantly instead of re-scraping while the player waits.
+const resolveCache = {};
+function cacheGet(k) {
+  const e = resolveCache[k];
+  if (!e || Date.now() > e.exp) { delete resolveCache[k]; return null; }
+  return e.v;
+}
+const RESOLVE_TTL_MS = 120 * 1000;
+
 function jres(res, obj, status) {
   res.writeHead(status || 200, Object.assign({ 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }));
   res.end(JSON.stringify(obj));
@@ -221,6 +231,10 @@ async function collectStreams(params) {
   const season = parseInt(params.get('s') || '0');
   const episode = parseInt(params.get('e') || '0');
 
+  const cacheKey = 'cs_' + type + '_' + imdb + '_' + tmdb + '_' + season + '_' + episode;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
   const meta = await getMeta(imdb, tmdb, type);
   const cards = parseCards(await getText(BASE_URL + '/?s=' + encodeURIComponent(meta.title)));
 
@@ -232,7 +246,11 @@ async function collectStreams(params) {
     if (meta.year && c.year && Math.abs(c.year - meta.year) > 1) score -= 50;
     if (score > bestScore) { bestScore = score; best = c; }
   }
-  if (!best) return { streams: [], note: 'no site match', meta };
+  if (!best) {
+    const out = { streams: [], note: 'no site match', meta };
+    cacheSet(cacheKey, out, 30 * 1000);
+    return out;
+  }
 
   const html = await getText(best.url);
   const items = wantSeries ? parseEpisodes(html, season, episode) : parseDownloadItems(html);
@@ -275,7 +293,9 @@ async function collectStreams(params) {
       referer: best.url
     });
   }
-  return { streams, meta };
+  const out = { streams, meta };
+  cacheSet(cacheKey, out, RESOLVE_TTL_MS);
+  return out;
 }
 
 async function handleStreams(params) {
