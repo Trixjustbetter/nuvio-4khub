@@ -508,6 +508,7 @@
     var wantSeries = mediaType === 'tv' || mediaType === 'series';
 
     return searchSite(title, mediaType).then(function (cards) {
+      log('search cards:', cards.length);
       var card = findBestCard(cards, title, year);
       if (!card) throw new Error('No 4KHDHub result for "' + title + '" (' + year + ')');
       log('matched page:', card.url);
@@ -546,8 +547,12 @@
     var mt = (mediaType === 'tv' || mediaType === 'series') ? 'tv' : 'movie';
     log('getStreams', tmdbId, mt, season || '-', episode || '-');
     return getTmdbDetails(tmdbId, mt).then(function (meta) {
+      log('tmdb meta:', JSON.stringify(meta));
       if (!meta || !meta.title) throw new Error('TMDB lookup failed for id ' + tmdbId);
       return getStreamsByMeta(meta.title, meta.year, mt, season, episode);
+    }).catch(function (e) {
+      log('FATAL in getStreams:', e && e.message);
+      throw e;
     });
   }
 
