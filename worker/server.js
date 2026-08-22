@@ -306,6 +306,16 @@ async function handleStreams(params) {
   return collectStreams(params);
 }
 
+// ring buffer of recent activity, readable at /debug/log
+global.__reqlog = global.__reqlog || [];
+function dlog(obj) {
+  try {
+    obj.t = new Date().toISOString().slice(11, 19);
+    global.__reqlog.push(obj);
+    if (global.__reqlog.length > 60) global.__reqlog.shift();
+  } catch (_) {}
+}
+
 // /play — proxy candidates directly at play-time (no quota-burning probes).
 // The proxy attempt itself is the validity check: video pipes through,
 // 403/HTML candidates are skipped for the next one.
@@ -326,7 +336,7 @@ async function handlePlay(res, params, rangeHeader) {
       const upstream = await fetch(url, { headers: h });
       const ct = upstream.headers.get('content-type') || '';
       if (upstream.status >= 400 || /text\/html/i.test(ct)) {
-        console.log('[play] skip', upstream.status, ct.slice(0, 30), url.slice(0, 70));
+        dlog({ kind: 'skip', status: upstream.status, ct: ct.slice(0, 30), url: url.slice(0, 80) });
         continue;
       }
 
@@ -337,17 +347,22 @@ async function handlePlay(res, params, rangeHeader) {
       });
       headers['Access-Control-Allow-Origin'] = '*';
       res.writeHead(upstream.status, headers);
+      dlog({ kind: 'pipe', status: upstream.status, ct: ct.slice(0, 40), url: url.slice(0, 80), range: rangeHeader || null });
       const { Readable } = require('stream');
       Readable.fromWeb(upstream.body).pipe(res);
       return;
-    } catch (e) { /* try next candidate */ }
+    } catch (e) {
+      dlog({ kind: 'err', msg: String((e && e.message) || e).slice(0, 80) });
+    }
   }
+  dlog({ kind: 'dead', tried: tryUrls.map(u => u.slice(0, 60)) });
   jres(res, { error: 'all mirrors dead at play time' }, 502);
 }
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const p = url.searchParams;
+  dlog({ kind: 'req', path: url.pathname + (url.search || '').slice(0, 60), range: req.headers.range || null });
   try {
     // ---------- Stremio addon protocol ----------
     if (url.pathname === '/manifest.json') {
@@ -396,7 +411,8 @@ const server = http.createServer(async (req, res) => {
         return {
           name: s.name,
           title: s.title + (s.quality ? '\n' + s.quality : ''),
-          url: playBase + '&idx=' + i
+          url: playBase + '&idx=' + i,
+          behaviorHints: { notWebReady: true }
         };
       });
       return jres(res, { streams: streams });
@@ -407,6 +423,8 @@ const server = http.createServer(async (req, res) => {
       jres(res, out);
     } else if (url.pathname === '/play') {
       await handlePlay(res, p, req.headers['range']);
+    if (url.pathname === '/debug/log') {
+      return jres(res, { log: global.__reqlog });
     } else if (url.pathname === '/') {
       jres(res, { ok: true, endpoints: ['/streams', '/play'] });
     } else {
