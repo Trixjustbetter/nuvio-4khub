@@ -255,6 +255,7 @@ async function collectStreams(params) {
 
   const html = await getText(best.url);
   const items = wantSeries ? parseEpisodes(html, season, episode) : parseDownloadItems(html);
+  global.__lastCollect = { title: meta.title, wantSeries, itemsLen: items.length, seasonArg: season, episodeArg: episode };
   const limited = items.slice(0, 6);
 
   const streams = [];
@@ -370,7 +371,8 @@ const server = http.createServer(async (req, res) => {
 
       const isImdb = /^tt\d+/i.test(rawId);
       const pmap = {
-        type: type,
+        // NOTE: collectStreams expects 'tv', not 'series'
+        type: type === 'series' ? 'tv' : 'movie',
         imdb: isImdb ? rawId : '',
         tmdb: isImdb ? '' : rawId.replace(/^tmdb:/i, ''),
         s: String(season),
@@ -380,7 +382,7 @@ const server = http.createServer(async (req, res) => {
 
       const out = await collectStreams(shim);
       const playBase = 'https://' + (req.headers.host || 'nuvio-4khub.onrender.com') +
-                       '/play?type=' + type +
+                       '/play?type=' + pmap.type +
                        '&imdb=' + encodeURIComponent(pmap.imdb) +
                        '&tmdb=' + encodeURIComponent(pmap.tmdb) +
                        '&s=' + season + '&e=' + episode;
@@ -392,7 +394,7 @@ const server = http.createServer(async (req, res) => {
           behaviorHints: { notWebReady: true }
         };
       });
-      return jres(res, { streams: streams, sources: undefined });
+      return jres(res, { streams: streams });
     }
 
     if (url.pathname === '/streams') {
