@@ -1,19 +1,15 @@
-// 4KHDHub resolver — Cloudflare Worker
-// Endpoints:
-//   /streams?type=movie|tv&imdb=tt...&tmdb=123&s=1&e=1  -> JSON {streams:[...]}
-//   /play?c0=<url>&c1=<url>&ref=<b64referer>            -> proxies first live mirror,
-//                                                          auto-failover between candidates
-// Configure TMDB_KEY below (same key as the provider).
+// 4KHDHub resolver — Node server (deployable on Render.com free tier)
+const http = require('http');
 
 const TMDB_KEY = 'cd85a9c87eb793d68cbf5b492590e1de';
 const BASE_URL = 'https://4khdhub.one';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const BRAND = 'TrixPlay';
+const PORT = process.env.PORT || 3000;
 
-const JSON_HEADERS = { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' };
-
-function jres(obj, status) {
-  return new Response(JSON.stringify(obj), { status: status || 200, headers: JSON_HEADERS });
+function jres(res, obj, status) {
+  res.writeHead(status || 200, Object.assign({ 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }));
+  res.end(JSON.stringify(obj));
 }
 
 async function getText(url, referer) {
@@ -24,10 +20,7 @@ async function getText(url, referer) {
   return res.text();
 }
 
-async function getJson(url) {
-  const t = await getText(url);
-  return JSON.parse(t);
-}
+async function getJson(url) { return JSON.parse(await getText(url)); }
 
 function stripTags(s) { return String(s == null ? '' : s).replace(/<[^>]*>/g, ''); }
 function decodeEntities(s) {
@@ -82,7 +75,6 @@ function detectLanguages(text) {
   return langs.map(k => k.charAt(0) + k.slice(1).toLowerCase()).join(' / ');
 }
 
-// ---------- TMDB ----------
 async function getMeta(imdb, tmdb, type) {
   const t = type === 'tv' ? 'tv' : 'movie';
   if (imdb && /^tt\d+$/i.test(imdb)) {
@@ -91,23 +83,14 @@ async function getMeta(imdb, tmdb, type) {
     if (!bucket.length) bucket = d.movie_results || d.tv_results || [];
     if (!bucket.length) throw new Error('find failed');
     const b = bucket[0];
-    return {
-      title: b.title || b.name, year: parseInt((b.release_date || b.first_air_date || '').slice(0, 4)) || 0,
-      tmdbId: String(b.id), imdbId: imdb
-    };
+    return { title: b.title || b.name, year: parseInt((b.release_date || b.first_air_date || '').slice(0, 4)) || 0, tmdbId: String(b.id), imdbId: imdb };
   }
   const d = await getJson(`https://api.themoviedb.org/3/${t}/${tmdb}?api_key=${TMDB_KEY}&append_to_response=external_ids`);
-  return {
-    title: d.title || d.name, year: parseInt((d.release_date || d.first_air_date || '').slice(0, 4)) || 0,
-    tmdbId: String(d.id), imdbId: (d.external_ids && d.external_ids.imdb_id) || ''
-  };
+  return { title: d.title || d.name, year: parseInt((d.release_date || d.first_air_date || '').slice(0, 4)) || 0, tmdbId: String(d.id), imdbId: (d.external_ids && d.external_ids.imdb_id) || '' };
 }
 
-// ---------- 4khdhub scraping ----------
 function parseCards(html) {
-  const cards = [];
-  const positions = [];
-  const re = /<a\s+href="([^"]+)"\s+class="movie-card"/g;
+  const cards = [], positions = [], re = /<a\s+href="([^"]+)"\s+class="movie-card"/g;
   let m;
   while ((m = re.exec(html)) !== null) positions.push({ index: m.index, href: m[1] });
   for (let i = 0; i < positions.length; i++) {
@@ -117,19 +100,13 @@ function parseCards(html) {
     if (!tm || !mm) continue;
     const ym = /(\d{4})/.exec(cleanText(mm[1]).slice(0, 12));
     const slug = /(movie|series)-\d+/.exec(positions[i].href);
-    cards.push({
-      url: BASE_URL + positions[i].href,
-      title: cleanText(tm[1]),
-      year: ym ? parseInt(ym[1]) : 0,
-      isSeries: slug ? slug[1] === 'series' : false
-    });
+    cards.push({ url: BASE_URL + positions[i].href, title: cleanText(tm[1]), year: ym ? parseInt(ym[1]) : 0, isSeries: slug ? slug[1] === 'series' : false });
   }
   return cards;
 }
 
 function classifyLinks(chunk) {
-  const links = [];
-  const re = /href="(https?:\/\/[^"]+)"/g;
+  const links = [], re = /href="(https?:\/\/[^"]+)"/g;
   let m;
   while ((m = re.exec(chunk)) !== null) {
     const href = m[1];
@@ -140,8 +117,7 @@ function classifyLinks(chunk) {
 }
 
 function parseDownloadItems(html) {
-  const items = [];
-  const marker = '<div class="download-item';
+  const items = [], marker = '<div class="download-item';
   const positions = [];
   let idx = html.indexOf(marker);
   while (idx !== -1) { positions.push(idx); idx = html.indexOf(marker, idx + marker.length); }
@@ -173,7 +149,6 @@ function parseEpisodes(html, season, episode) {
   for (let i = 0; i < positions.length; i++) {
     const contextBefore = region.slice(Math.max(0, positions[i] - 3000), positions[i]);
     const chunk = region.substring(positions[i], i + 1 < positions.length ? positions[i + 1] : region.length);
-
     let itemSeason = 0;
     const sms = contextBefore.match(/class="episode-number"[^>]*>\s*S?(\d{1,2})\s*</g);
     if (sms && sms.length) {
@@ -200,8 +175,7 @@ async function resolveMirrorChain(mirrorUrl) {
   const page = await getText(mirrorUrl, BASE_URL);
   const um = /var\s+url\s*=\s*'([^']+)'/i.exec(page);
   const finalPage = um ? await getText(um[1], mirrorUrl) : page;
-  const links = [];
-  const re = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>/gi;
+  const links = [], re = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>/gi;
   let m;
   while ((m = re.exec(finalPage)) !== null) {
     const href = m[1];
@@ -233,6 +207,11 @@ async function isPlayable(url, referer) {
   } catch (e) { return false; }
 }
 
+function container(f) {
+  const m = /\.(mkv|mp4|avi)\b/i.exec(String(f || ''));
+  return m ? m[1].toUpperCase() : '';
+}
+
 async function handleStreams(params) {
   const type = params.get('type') === 'tv' ? 'tv' : 'movie';
   const imdb = params.get('imdb') || '';
@@ -259,7 +238,6 @@ async function handleStreams(params) {
 
   const streams = [];
   for (const item of limited) {
-    // collect candidates from all external links (hubcloud/hubdrive chains)
     let candidates = [];
     for (const link of item.links) {
       try {
@@ -276,11 +254,10 @@ async function handleStreams(params) {
           const id = link.match(/u\/([A-Za-z0-9]+)/)[1];
           candidates.push('https://pixeldrain.com/api/file/' + id + '?download');
         }
-      } catch (e) { /* skip broken chain */ }
+      } catch (e) { /* skip */ }
     }
     candidates = [...new Set(candidates)].sort((a, b) => rank(a) - rank(b));
 
-    // pick first playable
     let winner = null;
     for (const c of candidates.slice(0, 4)) {
       if (await isPlayable(c, best.url)) { winner = c; break; }
@@ -300,60 +277,53 @@ async function handleStreams(params) {
   return { streams };
 }
 
-function container(f) {
-  const m = /\.(mkv|mp4|avi)\b/i.exec(String(f || ''));
-  return m ? m[1].toUpperCase() : '';
-}
-
 // /play — proxy first live candidate, fail over automatically
-async function handlePlay(params) {
+async function handlePlay(res, params) {
   const refs = [];
   for (let i = 0; i < 6; i++) {
     const c = params.get('c' + i);
     if (c) refs.push(c);
   }
-  const referer = params.get('ref') ? atob(params.get('ref')) : BASE_URL;
-  const range = '';
+  const referer = params.get('ref') ? Buffer.from(params.get('ref'), 'base64').toString() : BASE_URL;
 
   for (const url of refs) {
     try {
-      const upstream = await fetch(url, {
-        headers: Object.assign({ 'User-Agent': UA }, referer ? { Referer: referer } : {})
-      });
+      const upstream = await fetch(url, { headers: Object.assign({ 'User-Agent': UA }, referer ? { Referer: referer } : {}) });
       const ct = upstream.headers.get('content-type') || '';
       if (upstream.status >= 400 || /text\/html/i.test(ct)) continue;
 
-      const headers = new Headers();
-      for (const h of ['content-type', 'content-length', 'content-disposition', 'accept-ranges']) {
+      const headers = {};
+      ['content-type', 'content-length', 'content-disposition', 'accept-ranges'].forEach(h => {
         const v = upstream.headers.get(h);
-        if (v) headers.set(h, v);
-      }
-      headers.set('Access-Control-Allow-Origin', '*');
-      return new Response(upstream.body, { status: upstream.status, headers });
-    } catch (e) { /* try next */ }
+        if (v) headers[h] = v;
+      });
+      headers['Access-Control-Allow-Origin'] = '*';
+      res.writeHead(upstream.status, headers);
+      const { Readable } = require('stream');
+      Readable.fromWeb(upstream.body).pipe(res);
+      return;
+    } catch (e) { /* next candidate */ }
   }
-  return jres({ error: 'all mirrors dead' }, 502);
+  jres(res, { error: 'all mirrors dead' }, 502);
 }
 
-export default {
-  async fetch(request) {
-    const url = new URL(request.url);
-    const p = url.searchParams;
-    try {
-      if (url.pathname === '/debug') {
-        const out = {};
-        try { const r = await fetch(BASE_URL, { headers: { 'User-Agent': UA, 'Accept': 'text/html' }, redirect: 'follow' }); out.site = r.status + ' ' + (r.headers.get('server') || ''); const b = await r.text(); out.siteLen = b.length; } catch (e) { out.site = 'ERR ' + e.message; }
-        try { const r = await fetch('https://api.themoviedb.org/3/configuration?api_key=' + TMDB_KEY); out.tmdb = r.status; } catch (e) { out.tmdb = 'ERR ' + e.message; }
-        try { const r = await fetch('https://hubcloud.cx/', { headers: { 'User-Agent': UA } }); out.hubcloud = r.status; } catch (e) { out.hubcloud = 'ERR ' + e.message; }
-        out.colocate = request.cf && request.cf.colo;
-        return jres(out);
-      }
-      if (url.pathname === '/streams') return jres(await handleStreams(p));
-      if (url.pathname === '/play') return handlePlay(p);
-      if (url.pathname === '/') return jres({ ok: true, endpoints: ['/streams', '/play'] });
-      return jres({ error: 'not found' }, 404);
-    } catch (e) {
-      return jres({ error: String(e && e.message || e) }, 500);
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+  const p = url.searchParams;
+  try {
+    if (url.pathname === '/streams') {
+      const out = await handleStreams(p);
+      jres(res, out);
+    } else if (url.pathname === '/play') {
+      await handlePlay(res, p);
+    } else if (url.pathname === '/') {
+      jres(res, { ok: true, endpoints: ['/streams', '/play'] });
+    } else {
+      jres(res, { error: 'not found' }, 404);
     }
+  } catch (e) {
+    jres(res, { error: String(e && e.message || e) }, 500);
   }
-};
+});
+
+server.listen(PORT, () => console.log('resolver listening on :' + PORT));
