@@ -192,16 +192,34 @@
       return Promise.reject(new Error('TMDB_API_KEY is empty — paste your free key at the top of providers/4khdhub.js'));
     }
     var t = (mediaType === 'tv' || mediaType === 'series') ? 'tv' : 'movie';
-    var cacheKey = 'tmdb_' + t + '_' + tmdbId;
+    var idStr = String(tmdbId || '').trim();
+    var cacheKey = 'tmdb_' + t + '_' + idStr;
     var cached = cacheGet(cacheKey);
     if (cached) return Promise.resolve(cached);
-    var url = 'https://api.themoviedb.org/3/' + t + '/' + tmdbId + '?api_key=' + TMDB_API_KEY;
-    return httpGet(url, null, true).then(function (data) {
+
+    var toMeta = function (data) {
       var dateStr = data.release_date || data.first_air_date || '';
       var meta = { title: data.title || data.name || '', year: parseInt(dateStr.substring(0, 4), 10) || 0 };
+      if (!meta.title) throw new Error('TMDB lookup returned no title for id ' + tmdbId);
       cacheSet(cacheKey, meta, 24 * 60 * 60 * 1000);
       return meta;
-    });
+    };
+
+    // NOTE: Nuvio passes IMDb ids ("tt1234567"), not TMDB numbers — resolve
+    // them through the /find endpoint before doing anything else.
+    if (/^tt\d+$/i.test(idStr)) {
+      var findUrl = 'https://api.themoviedb.org/3/find/' + idStr +
+                    '?api_key=' + TMDB_API_KEY + '&external_source=imdb_id';
+      return httpGet(findUrl, null, true).then(function (res) {
+        var bucket = res[t + '_results'] || [];
+        if (!bucket.length) bucket = res.movie_results || res.tv_results || [];
+        if (!bucket.length) throw new Error('TMDB find failed for IMDb id ' + idStr);
+        return toMeta(bucket[0]);
+      });
+    }
+
+    var url = 'https://api.themoviedb.org/3/' + t + '/' + idStr + '?api_key=' + TMDB_API_KEY;
+    return httpGet(url, null, true).then(toMeta);
   }
 
   // ------------------------- search -------------------------
@@ -404,6 +422,7 @@
   function hostLabel(url) {
     if (/r2\.cloudflarestorage\.com/i.test(url)) return 'R2';
     if (/pixeldrain\.com/i.test(url)) return 'PixelDrain';
+    if (/workers\.dev\//i.test(url)) return 'Stream';
     if (/hubdrive\./i.test(url)) return 'HubDrive';
     if (/hubcloud\./i.test(url)) return 'HubCloud';
     return 'Direct';
