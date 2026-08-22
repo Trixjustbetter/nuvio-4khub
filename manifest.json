@@ -1,0 +1,19 @@
+{
+  "name": "Brody's Providers",
+  "version": "1.0.0",
+  "scrapers": [
+    {
+      "id": "4khdhub",
+      "name": "4KHDHub",
+      "description": "4K/1080p movies & series from 4khdhub.one via HubCloud/HubDrive direct links",
+      "version": "1.0.0",
+      "author": "brody",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/4khdhub.js",
+      "enabled": true,
+      "formats": ["mkv", "mp4"],
+      "logo": "https://www.google.com/s2/favicons?domain=4khdhub.one&sz=128",
+      "contentLanguage": ["en"]
+    }
+  ]
+}
