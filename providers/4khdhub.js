@@ -16,6 +16,11 @@
   var BRAND = 'TrixPlay';      // shown on every stream card
   var BRAND_ICON = '\uD83C\uDFAC'; // 🎬
 
+  // Optional self-hosted resolver (Cloudflare Worker). When set, resolving and
+  // mirror failover happen server-side with a fresh IP — far more stable than
+  // client-side scraping. Deploy: see /worker/README.md, then paste your URL.
+  var RESOLVER_URL = '';
+
   var MAX_ITEMS_PER_REQUEST = 12;
   var SEARCH_TTL_MS = 6 * 60 * 60 * 1000;
   var DETAIL_TTL_MS = 20 * 60 * 1000;
@@ -695,6 +700,33 @@
     return getTmdbDetails(tmdbId, mt).then(function (meta) {
       log('tmdb meta:', JSON.stringify(meta));
       if (!meta || !meta.title) throw new Error('TMDB lookup failed for id ' + tmdbId);
+
+      // Preferred path: self-hosted resolver worker (server-side, stable IPs)
+      if (RESOLVER_URL) {
+        var wq = 'type=' + mt +
+                 '&imdb=' + encodeURIComponent(meta.imdbId || '') +
+                 '&tmdb=' + encodeURIComponent(meta.tmdbId || '') +
+                 '&s=' + (season || 0) + '&e=' + (episode || 0);
+        return httpGet(RESOLVER_URL + '/streams?' + wq, null, true).then(function (res) {
+          var out = (res.streams || []).map(function (s) {
+            var playUrl = s.url;
+            if (s.candidates && s.candidates.length) {
+              var qs = s.candidates.map(function (c, ci) { return 'c' + ci + '=' + encodeURIComponent(c); }).join('&');
+              try { qs += '&ref=' + btoa(s.referer || ''); } catch (e) {}
+              playUrl = RESOLVER_URL + '/play?' + qs;
+            }
+            return { name: s.name, title: s.title, url: playUrl, quality: s.quality };
+          });
+          log('resolver returned ' + out.length + ' stream(s)');
+          if (out.length) return out;
+          // worker found nothing — fall through to local pipeline
+          return getStreamsByMeta(meta.title, meta.year, mt, season, episode);
+        }).catch(function (e) {
+          log('resolver failed, using local pipeline:', e && e.message);
+          return getStreamsByMeta(meta.title, meta.year, mt, season, episode);
+        });
+      }
+
       return getStreamsByMeta(meta.title, meta.year, mt, season, episode)
         .catch(function (e) {
           log('4khdhub pipeline failed:', e && e.message);
