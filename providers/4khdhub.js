@@ -19,7 +19,7 @@
   // Optional self-hosted resolver (Cloudflare Worker). When set, resolving and
   // mirror failover happen server-side with a fresh IP — far more stable than
   // client-side scraping. Deploy: see /worker/README.md, then paste your URL.
-  var RESOLVER_URL = '';
+  var RESOLVER_URL = 'https://nuvio-4khub.onrender.com';
 
   var MAX_ITEMS_PER_REQUEST = 12;
   var SEARCH_TTL_MS = 6 * 60 * 60 * 1000;
