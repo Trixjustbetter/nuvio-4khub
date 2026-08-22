@@ -231,7 +231,7 @@ function container(f) {
 
 // Re-resolve the title live and return validated stream entries (with candidates).
 // Used by both /streams (listing) and /play (fresh-at-play-time resolution).
-async function collectStreams(params) {
+async function collectStreams(params, opts) {
   const type = params.get('type') === 'tv' ? 'tv' : 'movie';
   const imdb = params.get('imdb') || '';
   const tmdb = params.get('tmdb') || '';
@@ -239,8 +239,10 @@ async function collectStreams(params) {
   const episode = parseInt(params.get('e') || '0');
 
   const cacheKey = 'cs_' + type + '_' + imdb + '_' + tmdb + '_' + season + '_' + episode;
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
+  if (!(opts && opts.fresh)) {
+    const cached = cacheGet(cacheKey);
+    if (cached) return cached;
+  }
 
   const meta = await getMeta(imdb, tmdb, type);
   const cards = parseCards(await getText(BASE_URL + '/?s=' + encodeURIComponent(meta.title)));
@@ -325,54 +327,64 @@ function dlog(obj) {
 
 // /play — proxy candidates directly at play-time (no quota-burning probes).
 // The proxy attempt itself is the validity check: video pipes through,
-// 403/HTML candidates are skipped for the next one.
+// 403/HTML candidates are skipped for the next one. If the whole (possibly
+// cached) pool is dead, force a FRESH re-scrape and retry once — mirror
+// quotas roll on minutes-scale windows, so new links may already be alive.
 async function handlePlay(res, params, rangeHeader) {
   const idx = parseInt(params.get('idx') || '0');
-  const { streams } = await collectStreams(params);
-  const entry = streams[idx];
-  if (!entry) return jres(res, { error: 'no such stream at play-time' }, 404);
 
-  const referer = entry.referer;
-  // Failover pool: this entry's links first, then every other entry's links
-  // (they're alternate mirrors/uploads of the same title — better anything
-  // plays at a different quality than nothing plays at all).
-  const pool = [entry.url].concat(entry.candidates || []);
-  for (const other of streams) {
-    if (other === entry) continue;
-    pool.push(other.url);
-    (other.candidates || []).forEach(c => pool.push(c));
-  }
-  const tryUrls = [...new Set(pool.filter(Boolean))];
-
-  for (const url of tryUrls) {
-    try {
-      const h = { 'User-Agent': UA };
-      if (referer) h['Referer'] = referer;
-      if (rangeHeader) h['Range'] = rangeHeader;
-      const upstream = await fetch(url, { headers: h });
-      const ct = upstream.headers.get('content-type') || '';
-      if (upstream.status >= 400 || /text\/html/i.test(ct)) {
-        dlog({ kind: 'skip', status: upstream.status, ct: ct.slice(0, 30), url: url.slice(0, 80) });
-        continue;
-      }
-
-      const headers = {};
-      ['content-type', 'content-length', 'content-disposition', 'accept-ranges', 'content-range'].forEach(hh => {
-        const v = upstream.headers.get(hh);
-        if (v) headers[hh] = v;
-      });
-      headers['Access-Control-Allow-Origin'] = '*';
-      res.writeHead(upstream.status, headers);
-      dlog({ kind: 'pipe', status: upstream.status, ct: ct.slice(0, 40), url: url.slice(0, 80), range: rangeHeader || null });
-      const { Readable } = require('stream');
-      Readable.fromWeb(upstream.body).pipe(res);
-      return;
-    } catch (e) {
-      dlog({ kind: 'err', msg: String((e && e.message) || e).slice(0, 80) });
+  const attempt = async (streams, tag) => {
+    const entry = streams[idx];
+    if (!entry) return false;
+    // Failover pool: this entry's links first, then every other entry's links
+    // (alternate mirrors/uploads of the same title — better anything plays at
+    // a different quality than nothing plays at all).
+    const pool = [entry.url].concat(entry.candidates || []);
+    for (const other of streams) {
+      if (other === entry) continue;
+      pool.push(other.url);
+      (other.candidates || []).forEach(c => pool.push(c));
     }
+    const tryUrls = [...new Set(pool.filter(Boolean))];
+    const referer = entry.referer;
+
+    for (const url of tryUrls) {
+      try {
+        const h = { 'User-Agent': UA };
+        if (referer) h['Referer'] = referer;
+        if (rangeHeader) h['Range'] = rangeHeader;
+        const upstream = await fetch(url, { headers: h });
+        const ct = upstream.headers.get('content-type') || '';
+        if (upstream.status >= 400 || /text\/html/i.test(ct)) {
+          dlog({ kind: 'skip', tag: tag, status: upstream.status, ct: ct.slice(0, 30), url: url.slice(0, 80) });
+          continue;
+        }
+
+        const headers = {};
+        ['content-type', 'content-length', 'content-disposition', 'accept-ranges', 'content-range'].forEach(hh => {
+          const v = upstream.headers.get(hh);
+          if (v) headers[hh] = v;
+        });
+        headers['Access-Control-Allow-Origin'] = '*';
+        res.writeHead(upstream.status, headers);
+        dlog({ kind: 'pipe', tag: tag, status: upstream.status, ct: ct.slice(0, 40), url: url.slice(0, 80), range: rangeHeader || null });
+        const { Readable } = require('stream');
+        Readable.fromWeb(upstream.body).pipe(res);
+        return true;
+      } catch (e) {
+        dlog({ kind: 'err', msg: String((e && e.message) || e).slice(0, 80) });
+      }
+    }
+    dlog({ kind: 'dead', tag: tag, tried: tryUrls.length });
+    return false;
+  };
+
+  let done = await attempt((await collectStreams(params)).streams, 'cached');
+  if (!done) {
+    dlog({ kind: 'fresh-retry' });
+    done = await attempt((await collectStreams(params, { fresh: true })).streams, 'fresh');
   }
-  dlog({ kind: 'dead', tried: tryUrls.map(u => u.slice(0, 60)) });
-  jres(res, { error: 'all mirrors dead at play time' }, 502);
+  if (!done) jres(res, { error: 'all mirrors dead at play time' }, 502);
 }
 
 const server = http.createServer(async (req, res) => {
