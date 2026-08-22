@@ -475,13 +475,13 @@
         if (lang) detailParts.push(lang);
         if (item.size || r.size) detailParts.push(item.size || r.size);
 
-        // NOTE: only the four fields proven to display in Nuvio are returned —
-        // extra keys (size/language as object fields) coincided with the app
-        // showing "no streams found", so that info lives in the title instead.
+        // NOTE: v1.0.7 experiment proved fields are not the problem — emoji
+        // characters (surrogate pairs) in display strings are the remaining
+        // delta from the last version that rendered in-app, so they're gone.
         return {
-          name: BRAND_ICON + ' ' + BRAND + ' \u2744\uFE0F #' + (index + 1) + ' \u00b7 ' + tierLabel +
-                ' \u00b7 4KHDHub \u00b7 ' + hostLabel(url),
-          title: detailParts.join(' \u2022 ') || tierLabel,
+          name: BRAND + ' #' + (index + 1) + ' - ' + tierLabel +
+                ' - 4KHDHub - ' + hostLabel(url),
+          title: detailParts.join(' - ') || tierLabel,
           url: url,
           quality: tierLabel
         };
