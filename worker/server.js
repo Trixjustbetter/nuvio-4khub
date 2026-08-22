@@ -16,7 +16,9 @@ function cacheGet(k) {
   if (!e || Date.now() > e.exp) { delete resolveCache[k]; return null; }
   return e.v;
 }
-const RESOLVE_TTL_MS = 120 * 1000;
+// Long TTL is safe: /play doesn't trust stored URLs — it re-attempts every
+// candidate live and only pipes what actually serves video.
+const RESOLVE_TTL_MS = 15 * 60 * 1000;
 
 function jres(res, obj, status) {
   res.writeHead(status || 200, Object.assign({ 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }));
@@ -382,24 +384,21 @@ const server = http.createServer(async (req, res) => {
 
       const out = await collectStreams(shim);
 
-      // Validate NOW (at listing) and hand back direct links — instant play,
-      // no second hop. Sources re-request on every title open, so links are
-      // always freshly checked.
-      const streams = [];
-      for (let i = 0; i < out.streams.length; i++) {
-        const s = out.streams[i];
-        let winner = null;
-        for (const c of [s.url].concat(s.candidates || [])) {
-          if (winner) break;
-          winner = await isPlayable(c) ? c : null;
-        }
-        if (!winner) continue;
-        streams.push({
+      // IMPORTANT: hand back /play proxy URLs. The mirrors are per-IP quota
+      // limited — direct links 403 from the viewer's device. Playback must
+      // flow through this server so ITS ip does the mirror fetch.
+      const playBase = 'https://' + (req.headers.host || 'nuvio-4khub.onrender.com') +
+                       '/play?type=' + type +
+                       '&imdb=' + encodeURIComponent(pmap.imdb) +
+                       '&tmdb=' + encodeURIComponent(pmap.tmdb) +
+                       '&s=' + season + '&e=' + episode;
+      const streams = out.streams.map(function (s, i) {
+        return {
           name: s.name,
           title: s.title + (s.quality ? '\n' + s.quality : ''),
-          url: winner
-        });
-      }
+          url: playBase + '&idx=' + i
+        };
+      });
       return jres(res, { streams: streams });
     }
 
