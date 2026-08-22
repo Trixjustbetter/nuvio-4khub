@@ -115,6 +115,58 @@
     return n * 1024 * 1024;
   }
 
+  function tierOf(text) {
+    var t = String(text || '');
+    if (/2160p|\b4k\b|uhd/i.test(t)) return '2160p';
+    if (/1080p/i.test(t)) return '1080p';
+    if (/720p/i.test(t)) return '720p';
+    if (/480p/i.test(t)) return '480p';
+    return '';
+  }
+
+  function prettyTags(text) {
+    var t = String(text || '').toUpperCase();
+    var tags = [];
+    if (/REMUX/.test(t)) tags.push('REMUX');
+    else if (/WEB[\s-]?DL/.test(t)) tags.push('WEB-DL');
+    else if (/BLU-?RAY|BDRIP/.test(t)) tags.push('BluRay');
+    if (/DOLBY.?VISION|\bDV\b|DOVI/.test(t)) tags.push('DV');
+    if (/HDR10\+/.test(t)) tags.push('HDR10+');
+    else if (/\bHDR\b/.test(t)) tags.push('HDR');
+    if (/\bAV1\b/.test(t)) tags.push('AV1');
+    else if (/HEVC|H\.?265/.test(t)) tags.push('HEVC');
+    else if (/X264|AVC|H\.?264\b/.test(t)) tags.push('x264');
+    return tags.join(' \u00b7 ');
+  }
+
+  function detectLanguage(text) {
+    var m = /Hindi|English|Tamil|Telugu|Malayalam|Dual Audio|Multi/i.exec(String(text || ''));
+    if (!m) return '';
+    var w = m[0];
+    return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+  }
+
+  // One stream per resolution tier: prefer REMUX, then bigger size.
+  function dedupeItems(items) {
+    var best = {};
+    items.forEach(function (it) {
+      var tier = tierOf(it.label + ' ' + it.fileName);
+      if (!tier) return;
+      var cur = best[tier];
+      if (!cur) { best[tier] = it; return; }
+      var remuxNew = /REMUX/i.test(it.fileName) || /REMUX/i.test(it.label) ? 1 : 0;
+      var remuxCur = /REMUX/i.test(cur.fileName) || /REMUX/i.test(cur.label) ? 1 : 0;
+      if (remuxNew > remuxCur ||
+          (remuxNew === remuxCur && sizeToBytes(it.size) > sizeToBytes(cur.size))) {
+        best[tier] = it;
+      }
+    });
+    var order = ['2160p', '1080p', '720p', '480p'];
+    var out = [];
+    order.forEach(function (t) { if (best[t]) out.push(best[t]); });
+    return out;
+  }
+
   // ------------------------- ttl cache -------------------------
   var cacheStore = {};
   function cacheSet(key, value, ttlMs) { cacheStore[key] = { v: value, exp: Date.now() + ttlMs }; }
@@ -350,12 +402,23 @@
       return null;
     }).then(function (res) {
       if (!res || !res.links || !res.links.length) return null;
-      var quality = detectQuality(item.label + ' ' + item.fileName);
+      var tier = tierOf(item.label + ' ' + item.fileName);
+      var tierLabel = tier === '2160p' ? '4K' : (tier || 'HD');
+      var tags = prettyTags(item.label + ' ' + item.fileName);
+      var lang = detectLanguage(item.fileName) || detectLanguage(item.label);
+      var parts = [];
+      if (tags) parts.push(tags);
+      if (lang) parts.push(lang);
+      if (item.size || res.size) parts.push(item.size || res.size);
+      // NOTE: Nuvio re-sorts results alphabetically by their display strings and
+      // ignores array order, so the leading "#N" rank keeps 4K above 1080p.
       return {
-        name: '4KHDHub',
-        title: (quality || 'HD') + ' | ' + (item.size || res.size || '') + ' | ' + (useHubCloud ? 'HubCloud' : 'HubDrive'),
+        name: '#' + (index + 1) + ' ' + tierLabel,
+        title: parts.join(' \u00b7 ') || (item.fileName || tierLabel),
         url: res.links[0],
-        quality: quality || 'HD'
+        quality: tierLabel,
+        size: item.size || res.size || '',
+        language: lang
       };
     });
   }
@@ -399,7 +462,9 @@
 
       return detail.then(function (items) {
         if (!items.length) return [];
-        return resolveItemsSequential(items).then(function (streams) {
+        var picked = dedupeItems(items);
+        if (!picked.length) picked = items;
+        return resolveItemsSequential(picked).then(function (streams) {
           streams.sort(function (a, b) {
             var d = qualityRank(a.quality) - qualityRank(b.quality);
             if (d !== 0) return d;
