@@ -708,14 +708,15 @@
                  '&tmdb=' + encodeURIComponent(meta.tmdbId || '') +
                  '&s=' + (season || 0) + '&e=' + (episode || 0);
         return httpGet(RESOLVER_URL + '/streams?' + wq, null, true).then(function (res) {
-          var out = (res.streams || []).map(function (s) {
-            var playUrl = s.url;
-            if (s.candidates && s.candidates.length) {
-              var qs = s.candidates.map(function (c, ci) { return 'c' + ci + '=' + encodeURIComponent(c); }).join('&');
-              try { qs += '&ref=' + btoa(s.referer || ''); } catch (e) {}
-              playUrl = RESOLVER_URL + '/play?' + qs;
-            }
-            return { name: s.name, title: s.title, url: playUrl, quality: s.quality };
+          var out = (res.streams || []).map(function (s, i) {
+            // /play re-resolves live at play-time (fresh validation) and
+            // proxies with Range support + mirror failover.
+            return {
+              name: s.name,
+              title: s.title,
+              url: RESOLVER_URL + '/play?' + wq + '&idx=' + i,
+              quality: s.quality
+            };
           });
           log('resolver returned ' + out.length + ' stream(s)');
           if (out.length) return out;

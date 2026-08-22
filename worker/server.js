@@ -212,7 +212,9 @@ function container(f) {
   return m ? m[1].toUpperCase() : '';
 }
 
-async function handleStreams(params) {
+// Re-resolve the title live and return validated stream entries (with candidates).
+// Used by both /streams (listing) and /play (fresh-at-play-time resolution).
+async function collectStreams(params) {
   const type = params.get('type') === 'tv' ? 'tv' : 'movie';
   const imdb = params.get('imdb') || '';
   const tmdb = params.get('tmdb') || '';
@@ -230,7 +232,7 @@ async function handleStreams(params) {
     if (meta.year && c.year && Math.abs(c.year - meta.year) > 1) score -= 50;
     if (score > bestScore) { bestScore = score; best = c; }
   }
-  if (!best) return { streams: [], note: 'no site match' };
+  if (!best) return { streams: [], note: 'no site match', meta };
 
   const html = await getText(best.url);
   const items = wantSeries ? parseEpisodes(html, season, episode) : parseDownloadItems(html);
@@ -274,37 +276,46 @@ async function handleStreams(params) {
       referer: best.url
     });
   }
-  return { streams };
+  return { streams, meta };
 }
 
-// /play — proxy first live candidate, fail over automatically
-async function handlePlay(res, params) {
-  const refs = [];
-  for (let i = 0; i < 6; i++) {
-    const c = params.get('c' + i);
-    if (c) refs.push(c);
-  }
-  const referer = params.get('ref') ? Buffer.from(params.get('ref'), 'base64').toString() : BASE_URL;
+async function handleStreams(params) {
+  return collectStreams(params);
+}
 
-  for (const url of refs) {
+// /play — re-resolve LIVE at play-time so the chosen mirror was verified
+// seconds ago, then proxy it with Range support. idx selects which entry.
+async function handlePlay(res, params) {
+  const idx = parseInt(params.get('idx') || '0');
+  const { streams } = await collectStreams(params);
+  const entry = streams[idx];
+  if (!entry) return jres(res, { error: 'no such stream at play-time' }, 404);
+
+  const referer = entry.referer;
+  const rangeHeader = params.get('_range') || '';
+
+  for (const url of [entry.url, ...entry.candidates]) {
     try {
-      const upstream = await fetch(url, { headers: Object.assign({ 'User-Agent': UA }, referer ? { Referer: referer } : {}) });
+      const h = { 'User-Agent': UA };
+      if (referer) h['Referer'] = referer;
+      if (rangeHeader) h['Range'] = rangeHeader;
+      const upstream = await fetch(url, { headers: h });
       const ct = upstream.headers.get('content-type') || '';
       if (upstream.status >= 400 || /text\/html/i.test(ct)) continue;
 
       const headers = {};
-      ['content-type', 'content-length', 'content-disposition', 'accept-ranges'].forEach(h => {
-        const v = upstream.headers.get(h);
-        if (v) headers[h] = v;
+      ['content-type', 'content-length', 'content-disposition', 'accept-ranges', 'content-range'].forEach(hh => {
+        const v = upstream.headers.get(hh);
+        if (v) headers[hh] = v;
       });
       headers['Access-Control-Allow-Origin'] = '*';
       res.writeHead(upstream.status, headers);
       const { Readable } = require('stream');
       Readable.fromWeb(upstream.body).pipe(res);
       return;
-    } catch (e) { /* next candidate */ }
+    } catch (e) { /* try next candidate */ }
   }
-  jres(res, { error: 'all mirrors dead' }, 502);
+  jres(res, { error: 'all mirrors dead at play time' }, 502);
 }
 
 const server = http.createServer(async (req, res) => {
