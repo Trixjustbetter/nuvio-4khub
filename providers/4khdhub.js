@@ -472,15 +472,18 @@
         detailParts.push(base + epTag);
         if (container) detailParts.push(container);
         if (tags) detailParts.push(tags);
+        if (lang) detailParts.push(lang);
+        if (item.size || r.size) detailParts.push(item.size || r.size);
 
+        // NOTE: only the four fields proven to display in Nuvio are returned —
+        // extra keys (size/language as object fields) coincided with the app
+        // showing "no streams found", so that info lives in the title instead.
         return {
           name: BRAND_ICON + ' ' + BRAND + ' \u2744\uFE0F #' + (index + 1) + ' \u00b7 ' + tierLabel +
                 ' \u00b7 4KHDHub \u00b7 ' + hostLabel(url),
           title: detailParts.join(' \u2022 ') || tierLabel,
           url: url,
-          quality: tierLabel,
-          size: item.size || r.size || '',
-          language: lang
+          quality: tierLabel
         };
       }
     });
