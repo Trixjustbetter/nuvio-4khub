@@ -423,7 +423,7 @@ const server = http.createServer(async (req, res) => {
       jres(res, out);
     } else if (url.pathname === '/play') {
       await handlePlay(res, p, req.headers['range']);
-    if (url.pathname === '/debug/log') {
+    } else if (url.pathname === '/debug/log') {
       return jres(res, { log: global.__reqlog });
     } else if (url.pathname === '/') {
       jres(res, { ok: true, endpoints: ['/streams', '/play'] });
