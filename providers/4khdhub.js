@@ -435,6 +435,32 @@
 
   function pad2(n) { n = Number(n); return (n < 10 ? '0' : '') + n; }
 
+  // Range-fetch a candidate and require an actual video/file response —
+  // workers.dev hosts return quota 403s and PixelServer mirrors 404 dead ids.
+  function isPlayable(url, referer) {
+    var headers = { 'User-Agent': DEFAULT_HEADERS['User-Agent'], Range: 'bytes=0-1023' };
+    if (referer) headers['Referer'] = referer;
+    return fetch(url, { method: 'GET', headers: headers }).then(function (res) {
+      var ct = res.headers.get('content-type') || '';
+      var ok = res.status >= 200 && res.status < 400 && !/text\/html/i.test(ct);
+      log('validate ' + (ok ? 'OK' : 'DEAD') + ' ' + res.status + ' ' + ct.slice(0, 30) + ' ' + url.slice(0, 70));
+      return ok;
+    }).catch(function (e) {
+      log('validate error:', e && e.message);
+      return false;
+    });
+  }
+
+  function pickPlayable(links, referer) {
+    var candidates = links.slice(0, 4);
+    return candidates.reduce(function (chain, link) {
+      return chain.then(function (found) {
+        if (found) return found;
+        return isPlayable(link, referer).then(function (ok) { return ok ? link : null; });
+      });
+    }, Promise.resolve(null));
+  }
+
   function resolveItem(item, index, total, mediaTitle, season, episode) {
     log('resolving ' + (index + 1) + '/' + total + ': ' + (item.fileName || item.label));
     var useHubCloud = !!item.links.hubcloud;
@@ -446,17 +472,27 @@
       log('resolver failed:', e && e.message);
       return null;
     }).then(function (res) {
-      if (!res || !res.links || !res.links.length) {
-        // HubCloud page had no usable server — retry via its HubDrive mirror
-        if (!useHubCloud || !item.links.hubdrive) return null;
-        log('hubcloud empty, trying hubdrive fallback');
-        return resolveHubDrive(item.links.hubdrive).catch(function () { return null; }).then(buildStream);
+      // Harvest final links from BOTH mirrors — each dies independently.
+      var jobs = [Promise.resolve((res && res.links) || [])];
+      if (item.links.hubdrive) {
+        jobs.push(resolveHubDrive(item.links.hubdrive).then(function (r) { return r.links; }).catch(function () { return []; }));
       }
-      return buildStream(res);
 
-      function buildStream(r) {
-        if (!r || !r.links || !r.links.length) return null;
-        var url = r.links[0];
+      return Promise.all(jobs).then(function (lists) {
+        var seen = [], merged = [];
+        lists.forEach(function (list) {
+          (list || []).forEach(function (l) {
+            if (seen.indexOf(l) === -1) { seen.push(l); merged.push(l); }
+          });
+        });
+        log('merged candidates: ' + merged.length);
+        return pickPlayable(merged, useHubCloud ? item.links.hubcloud : BASE_URL).then(function (u) {
+          return buildStream(u, res);
+        });
+      });
+
+      function buildStream(url, r) {
+        if (!url) { log('no playable link for item, dropping'); return null; }
         var tier = tierOf(item.label + ' ' + item.fileName);
         var tierLabel = tier === '2160p' ? '4K' : (tier || 'HD');
         var tags = prettyTags(item.label + ' ' + item.fileName);
@@ -465,25 +501,23 @@
         var epTag = (season && episode) ? ' S' + pad2(season) + 'E' + pad2(episode) : '';
         var container = containerTag(item.fileName);
 
-        // NOTE: Nuvio re-sorts results alphabetically by their display strings and
-        // ignores array order — the rank sits before anything tier-specific so 4K
-        // always lands above 1080p.
         var detailParts = [];
         detailParts.push(base + epTag);
         if (container) detailParts.push(container);
         if (tags) detailParts.push(tags);
         if (lang) detailParts.push(lang);
-        if (item.size || r.size) detailParts.push(item.size || r.size);
+        if (item.size || (r && r.size)) detailParts.push(item.size || r.size);
 
-        // NOTE: v1.0.7 experiment proved fields are not the problem — emoji
-        // characters (surrogate pairs) in display strings are the remaining
-        // delta from the last version that rendered in-app, so they're gone.
         return {
           name: BRAND + ' #' + (index + 1) + ' - ' + tierLabel +
                 ' - 4KHDHub - ' + hostLabel(url),
           title: detailParts.join(' - ') || tierLabel,
           url: url,
-          quality: tierLabel
+          quality: tierLabel,
+          headers: {
+            'User-Agent': DEFAULT_HEADERS['User-Agent'],
+            'Referer': BASE_URL
+          }
         };
       }
     });
