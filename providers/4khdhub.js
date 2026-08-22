@@ -13,7 +13,6 @@
   var BASE_URL = 'https://4khdhub.one';
   var TMDB_API_KEY = 'cd85a9c87eb793d68cbf5b492590e1de';
 
-  var REQUEST_TIMEOUT_MS = 15000;
   var MAX_ITEMS_PER_REQUEST = 12;
   var SEARCH_TTL_MS = 6 * 60 * 60 * 1000;
   var DETAIL_TTL_MS = 20 * 60 * 1000;
@@ -31,23 +30,16 @@
     console.log.apply(console, args);
   }
 
-  function withTimeout(promise, ms) {
-    return new Promise(function (resolve, reject) {
-      var timer = setTimeout(function () { reject(new Error('timeout after ' + ms + 'ms')); }, ms);
-      promise.then(function (v) { clearTimeout(timer); resolve(v); },
-                   function (e) { clearTimeout(timer); reject(e); });
-    });
-  }
-
+  // NOTE: the Nuvio JS sandbox provides fetch/console/module but NO setTimeout,
+  // so we must not use timers anywhere in this file.
   function httpGet(url, referer, asJson) {
     var headers = Object.assign({}, DEFAULT_HEADERS);
     if (referer) headers['Referer'] = referer;
     if (asJson) headers['Accept'] = 'application/json';
-    return withTimeout(fetch(url, { method: 'GET', headers: headers }), REQUEST_TIMEOUT_MS)
-      .then(function (res) {
-        if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + url);
-        return asJson ? res.text().then(JSON.parse) : res.text();
-      });
+    return fetch(url, { method: 'GET', headers: headers }).then(function (res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + url);
+      return asJson ? res.text().then(JSON.parse) : res.text();
+    });
   }
 
   function stripTags(s) { return String(s == null ? '' : s).replace(/<[^>]*>/g, ''); }
@@ -195,7 +187,7 @@
     var attempt = function (q) {
       return httpGet(BASE_URL + '/?s=' + encodeURIComponent(q)).then(parseCards);
     };
-    return attempt(query + ' ').catch(function () { return []; }).then(function (results) {
+    return attempt(query).catch(function () { return []; }).then(function (results) {
       var filtered = results.filter(function (c) { return c.isSeries === wantSeries; });
       cacheSet(cacheKey, filtered, SEARCH_TTL_MS);
       return filtered;
@@ -451,6 +443,10 @@
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;
   } else {
-    (Function('return this')()).__NUVIO_4KHDHUB = api;
+    try {
+      if (typeof globalThis !== 'undefined') globalThis.__NUVIO_4KHDHUB = api;
+      else if (typeof global !== 'undefined') global.__NUVIO_4KHDHUB = api;
+      else if (typeof window !== 'undefined') window.__NUVIO_4KHDHUB = api;
+    } catch (e) { /* no accessible global */ }
   }
 }).call(this);
