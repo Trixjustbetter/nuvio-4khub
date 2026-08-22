@@ -326,7 +326,16 @@ async function handlePlay(res, params, rangeHeader) {
   if (!entry) return jres(res, { error: 'no such stream at play-time' }, 404);
 
   const referer = entry.referer;
-  const tryUrls = [entry.url, ...entry.candidates.filter(c => c !== entry.url)];
+  // Failover pool: this entry's links first, then every other entry's links
+  // (they're alternate mirrors/uploads of the same title — better anything
+  // plays at a different quality than nothing plays at all).
+  const pool = [entry.url].concat(entry.candidates || []);
+  for (const other of streams) {
+    if (other === entry) continue;
+    pool.push(other.url);
+    (other.candidates || []).forEach(c => pool.push(c));
+  }
+  const tryUrls = [...new Set(pool.filter(Boolean))];
 
   for (const url of tryUrls) {
     try {
