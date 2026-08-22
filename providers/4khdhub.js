@@ -139,11 +139,17 @@
     return tags.join(' \u00b7 ');
   }
 
-  function detectLanguage(text) {
-    var m = /Hindi|English|Tamil|Telugu|Malayalam|Dual Audio|Multi/i.exec(String(text || ''));
-    if (!m) return '';
-    var w = m[0];
-    return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+  function detectLanguages(text) {
+    var t = String(text || '').toUpperCase();
+    var langs = [];
+    var known = ['ENGLISH', 'HINDI', 'TAMIL', 'TELUGU', 'MALAYALAM', 'JAPANESE', 'SPANISH', 'FRENCH', 'GERMAN', 'ITALIAN'];
+    known.forEach(function (k) {
+      if (t.indexOf(k) !== -1 && langs.indexOf(k) === -1) langs.push(k);
+    });
+    if (!langs.length && /DUAL|MULTI/.test(t)) return 'Multi';
+    // English first — most releases here are dual audio with an English track
+    langs.sort(function (a, b) { return (a === 'ENGLISH' ? -1 : 0) - (b === 'ENGLISH' ? -1 : 0); });
+    return langs.map(function (k) { return k.charAt(0) + k.slice(1).toLowerCase(); }).join(' / ');
   }
 
   // One stream per resolution tier: prefer REMUX, then bigger size.
@@ -390,7 +396,7 @@
     });
   }
 
-  function resolveItem(item, index, total) {
+  function resolveItem(item, index, total, mediaTitle) {
     log('resolving ' + (index + 1) + '/' + total + ': ' + (item.fileName || item.label));
     var useHubCloud = !!item.links.hubcloud;
     var job = useHubCloud
@@ -405,16 +411,14 @@
       var tier = tierOf(item.label + ' ' + item.fileName);
       var tierLabel = tier === '2160p' ? '4K' : (tier || 'HD');
       var tags = prettyTags(item.label + ' ' + item.fileName);
-      var lang = detectLanguage(item.fileName) || detectLanguage(item.label);
-      var parts = [];
-      if (tags) parts.push(tags);
-      if (lang) parts.push(lang);
-      if (item.size || res.size) parts.push(item.size || res.size);
+      var lang = detectLanguages(item.fileName + ' ' + item.label);
+      var base = String(mediaTitle || '').replace(/\s+/g, ' ').trim() || 'Source';
       // NOTE: Nuvio re-sorts results alphabetically by their display strings and
-      // ignores array order, so the leading "#N" rank keeps 4K above 1080p.
+      // ignores array order — the rank sits right after the shared movie-name
+      // prefix so 4K still lands above 1080p while the title stays visible.
       return {
-        name: '#' + (index + 1) + ' ' + tierLabel,
-        title: parts.join(' \u00b7 ') || (item.fileName || tierLabel),
+        name: base + ' #' + (index + 1) + ' \u00b7 ' + tierLabel,
+        title: tags || tierLabel,
         url: res.links[0],
         quality: tierLabel,
         size: item.size || res.size || '',
@@ -423,11 +427,11 @@
     });
   }
 
-  function resolveItemsSequential(items) {
+  function resolveItemsSequential(items, mediaTitle) {
     var limited = items.slice(0, MAX_ITEMS_PER_REQUEST);
     return limited.reduce(function (chain, item, i) {
       return chain.then(function (acc) {
-        return resolveItem(item, i, limited.length).then(function (stream) {
+        return resolveItem(item, i, limited.length, mediaTitle).then(function (stream) {
           if (stream) acc.push(stream);
           return acc;
         });
@@ -464,7 +468,7 @@
         if (!items.length) return [];
         var picked = dedupeItems(items);
         if (!picked.length) picked = items;
-        return resolveItemsSequential(picked).then(function (streams) {
+        return resolveItemsSequential(picked, title).then(function (streams) {
           streams.sort(function (a, b) {
             var d = qualityRank(a.quality) - qualityRank(b.quality);
             if (d !== 0) return d;
