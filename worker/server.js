@@ -388,7 +388,7 @@ const server = http.createServer(async (req, res) => {
       // limited — direct links 403 from the viewer's device. Playback must
       // flow through this server so ITS ip does the mirror fetch.
       const playBase = 'https://' + (req.headers.host || 'nuvio-4khub.onrender.com') +
-                       '/play?type=' + type +
+                       '/play?type=' + pmap.type +
                        '&imdb=' + encodeURIComponent(pmap.imdb) +
                        '&tmdb=' + encodeURIComponent(pmap.tmdb) +
                        '&s=' + season + '&e=' + episode;
