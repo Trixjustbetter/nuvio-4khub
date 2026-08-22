@@ -381,19 +381,25 @@ const server = http.createServer(async (req, res) => {
       const shim = { get: k => (pmap[k] !== undefined ? String(pmap[k]) : null) };
 
       const out = await collectStreams(shim);
-      const playBase = 'https://' + (req.headers.host || 'nuvio-4khub.onrender.com') +
-                       '/play?type=' + pmap.type +
-                       '&imdb=' + encodeURIComponent(pmap.imdb) +
-                       '&tmdb=' + encodeURIComponent(pmap.tmdb) +
-                       '&s=' + season + '&e=' + episode;
-      const streams = out.streams.map(function (s, i) {
-        return {
+
+      // Validate NOW (at listing) and hand back direct links — instant play,
+      // no second hop. Sources re-request on every title open, so links are
+      // always freshly checked.
+      const streams = [];
+      for (let i = 0; i < out.streams.length; i++) {
+        const s = out.streams[i];
+        let winner = null;
+        for (const c of [s.url].concat(s.candidates || [])) {
+          if (winner) break;
+          winner = await isPlayable(c) ? c : null;
+        }
+        if (!winner) continue;
+        streams.push({
           name: s.name,
           title: s.title + (s.quality ? '\n' + s.quality : ''),
-          url: playBase + '&idx=' + i,
-          behaviorHints: { notWebReady: true }
-        };
-      });
+          url: winner
+        });
+      }
       return jres(res, { streams: streams });
     }
 
