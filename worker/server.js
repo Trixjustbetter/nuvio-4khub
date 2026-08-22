@@ -195,7 +195,11 @@ async function resolveMirrorChain(mirrorUrl) {
     if (AD_RE.test(href)) continue;
     if (/gpdl\.|10gbps/i.test(href + finalPage.slice(m.index, m.index + 300))) continue;
     const ctx = finalPage.slice(m.index, m.index + 500);
-    if (/r2\.cloudflarestorage\.com/i.test(href) || /fsl/i.test(ctx) || /download[- ]?file/i.test(ctx)) links.push(href);
+    // explicit host acceptance — these cdn workers serve the actual files
+    const isFileLink = /r2\.cloudflarestorage\.com/i.test(href) ||
+                       /workers\.dev\/[A-Za-z0-9_-]{16,}/i.test(href) ||
+                       /fsl/i.test(ctx) || /download[- ]?file/i.test(ctx);
+    if (isFileLink) links.push(href);
     else {
       const pd = /pixeldrain\.(?:com|dev)\/u\/([A-Za-z0-9]+)/i.exec(href);
       if (pd) links.push('https://pixeldrain.com/api/file/' + pd[1] + '?download');
@@ -258,7 +262,7 @@ async function collectStreams(params) {
   const html = await getText(best.url);
   const items = wantSeries ? parseEpisodes(html, season, episode) : parseDownloadItems(html);
   global.__lastCollect = { title: meta.title, wantSeries, itemsLen: items.length, seasonArg: season, episodeArg: episode };
-  const limited = items.slice(0, 6);
+  const limited = items.slice(0, 12);
 
   const streams = [];
   for (const item of limited) {
@@ -298,6 +302,9 @@ async function collectStreams(params) {
     });
   }
   const out = { streams, meta };
+  const distinct = new Set();
+  streams.forEach(s => { distinct.add(s.url); (s.candidates || []).forEach(c => distinct.add(c)); });
+  dlog({ kind: 'collect', title: meta.title, s: season, e: episode, items: items.length, entries: streams.length, distinctUrls: distinct.size });
   cacheSet(cacheKey, out, RESOLVE_TTL_MS);
   return out;
 }
