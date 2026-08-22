@@ -13,6 +13,9 @@
   var BASE_URL = 'https://4khdhub.one';
   var TMDB_API_KEY = 'cd85a9c87eb793d68cbf5b492590e1de';
 
+  var BRAND = 'TrixPlay';      // shown on every stream card
+  var BRAND_ICON = '\uD83C\uDFAC'; // 🎬
+
   var MAX_ITEMS_PER_REQUEST = 12;
   var SEARCH_TTL_MS = 6 * 60 * 60 * 1000;
   var DETAIL_TTL_MS = 20 * 60 * 1000;
@@ -373,12 +376,14 @@
           var href = m[1];
           if (AD_HOST_RE.test(href)) continue;
           var ctx = finalPage.slice(m.index, m.index + 500);
+          var pdId;
           if (/r2\.cloudflarestorage\.com/i.test(href) || /fsl/i.test(ctx) || /download[- ]?file/i.test(ctx)) {
             links.push(href);
-          } else if (/pixeldrain\.com\/u\/([A-Za-z0-9]+)/i.test(href)) {
-            var id = /pixeldrain\.com\/u\/([A-Za-z0-9]+)/i.exec(href)[1];
-            links.push('https://pixeldrain.com/api/file/' + id + '?download');
+          } else if ((pdId = /pixeldrain\.(?:com|dev)\/u\/([A-Za-z0-9]+)/i.exec(href))) {
+            // PixelServer button — rewrite the viewer link into a direct file URL
+            links.push('https://pixeldrain.com/api/file/' + pdId[1] + '?download');
           }
+          // NOTE: 'Server : 10Gbps' gpdl.* gateways return 500s — deliberately skipped
         }
         var unique = [];
         links.forEach(function (l) { if (unique.indexOf(l) === -1) unique.push(l); });
@@ -396,7 +401,22 @@
     });
   }
 
-  function resolveItem(item, index, total, mediaTitle) {
+  function hostLabel(url) {
+    if (/r2\.cloudflarestorage\.com/i.test(url)) return 'R2';
+    if (/pixeldrain\.com/i.test(url)) return 'PixelDrain';
+    if (/hubdrive\./i.test(url)) return 'HubDrive';
+    if (/hubcloud\./i.test(url)) return 'HubCloud';
+    return 'Direct';
+  }
+
+  function containerTag(fileName) {
+    var m = /\.(mkv|mp4|avi|mpeg|mov|webm)\b/i.exec(String(fileName || ''));
+    return m ? m[1].toUpperCase() : '';
+  }
+
+  function pad2(n) { n = Number(n); return (n < 10 ? '0' : '') + n; }
+
+  function resolveItem(item, index, total, mediaTitle, season, episode) {
     log('resolving ' + (index + 1) + '/' + total + ': ' + (item.fileName || item.label));
     var useHubCloud = !!item.links.hubcloud;
     var job = useHubCloud
@@ -407,31 +427,51 @@
       log('resolver failed:', e && e.message);
       return null;
     }).then(function (res) {
-      if (!res || !res.links || !res.links.length) return null;
-      var tier = tierOf(item.label + ' ' + item.fileName);
-      var tierLabel = tier === '2160p' ? '4K' : (tier || 'HD');
-      var tags = prettyTags(item.label + ' ' + item.fileName);
-      var lang = detectLanguages(item.fileName + ' ' + item.label);
-      var base = String(mediaTitle || '').replace(/\s+/g, ' ').trim() || 'Source';
-      // NOTE: Nuvio re-sorts results alphabetically by their display strings and
-      // ignores array order — the rank sits right after the shared movie-name
-      // prefix so 4K still lands above 1080p while the title stays visible.
-      return {
-        name: base + ' #' + (index + 1) + ' \u00b7 ' + tierLabel,
-        title: tags || tierLabel,
-        url: res.links[0],
-        quality: tierLabel,
-        size: item.size || res.size || '',
-        language: lang
-      };
+      if (!res || !res.links || !res.links.length) {
+        // HubCloud page had no usable server — retry via its HubDrive mirror
+        if (!useHubCloud || !item.links.hubdrive) return null;
+        log('hubcloud empty, trying hubdrive fallback');
+        return resolveHubDrive(item.links.hubdrive).catch(function () { return null; }).then(buildStream);
+      }
+      return buildStream(res);
+
+      function buildStream(r) {
+        if (!r || !r.links || !r.links.length) return null;
+        var url = r.links[0];
+        var tier = tierOf(item.label + ' ' + item.fileName);
+        var tierLabel = tier === '2160p' ? '4K' : (tier || 'HD');
+        var tags = prettyTags(item.label + ' ' + item.fileName);
+        var lang = detectLanguages(item.fileName + ' ' + item.label);
+        var base = String(mediaTitle || '').replace(/\s+/g, ' ').trim() || BRAND;
+        var epTag = (season && episode) ? ' S' + pad2(season) + 'E' + pad2(episode) : '';
+        var container = containerTag(item.fileName);
+
+        // NOTE: Nuvio re-sorts results alphabetically by their display strings and
+        // ignores array order — the rank sits before anything tier-specific so 4K
+        // always lands above 1080p.
+        var detailParts = [];
+        detailParts.push(base + epTag);
+        if (container) detailParts.push(container);
+        if (tags) detailParts.push(tags);
+
+        return {
+          name: BRAND_ICON + ' ' + BRAND + ' \u2744\uFE0F #' + (index + 1) + ' \u00b7 ' + tierLabel +
+                ' \u00b7 4KHDHub \u00b7 ' + hostLabel(url),
+          title: detailParts.join(' \u2022 ') || tierLabel,
+          url: url,
+          quality: tierLabel,
+          size: item.size || r.size || '',
+          language: lang
+        };
+      }
     });
   }
 
-  function resolveItemsSequential(items, mediaTitle) {
+  function resolveItemsSequential(items, mediaTitle, season, episode) {
     var limited = items.slice(0, MAX_ITEMS_PER_REQUEST);
     return limited.reduce(function (chain, item, i) {
       return chain.then(function (acc) {
-        return resolveItem(item, i, limited.length, mediaTitle).then(function (stream) {
+        return resolveItem(item, i, limited.length, mediaTitle, season, episode).then(function (stream) {
           if (stream) acc.push(stream);
           return acc;
         });
@@ -453,14 +493,16 @@
       if (!card) throw new Error('No 4KHDHub result for "' + title + '" (' + year + ')');
       log('matched page:', card.url);
 
-      var detailCached = cacheGet('detail_' + card.url);
+      var detailKey = 'detail_' + card.url +
+        (wantSeries ? '_s' + (season || 0) + '_e' + (episode || 0) : '');
+      var detailCached = cacheGet(detailKey);
       var detail = detailCached
         ? Promise.resolve(detailCached)
         : httpGet(card.url).then(function (html) {
             var parsed = wantSeries
               ? parseEpisodes(html, season || 0, episode || 0)
               : parseDownloadItems(html);
-            cacheSet('detail_' + card.url, parsed, DETAIL_TTL_MS);
+            cacheSet(detailKey, parsed, DETAIL_TTL_MS);
             return parsed;
           });
 
@@ -468,7 +510,7 @@
         if (!items.length) return [];
         var picked = dedupeItems(items);
         if (!picked.length) picked = items;
-        return resolveItemsSequential(picked, title).then(function (streams) {
+        return resolveItemsSequential(picked, title, season, episode).then(function (streams) {
           streams.sort(function (a, b) {
             var d = qualityRank(a.quality) - qualityRank(b.quality);
             if (d !== 0) return d;
