@@ -260,17 +260,16 @@ async function collectStreams(params) {
     }
     candidates = [...new Set(candidates)].sort((a, b) => rank(a) - rank(b));
 
-    let winner = null;
-    for (const c of candidates.slice(0, 4)) {
-      if (await isPlayable(c, best.url)) { winner = c; break; }
-    }
-    if (!winner) continue;
+    // NOTE: no pre-validation here — every probe request burns these mirrors'
+    // tiny per-file quotas before the actual play. /play proxies candidates
+    // directly instead; its attempt IS the validity check.
+    if (!candidates.length) continue;
 
     const tier = tierOf(item.label + ' ' + item.fileName) || 'HD';
     streams.push({
       name: `${BRAND} #${streams.length + 1} - ${tier} - 4KHDHub`,
       title: [meta.title + (wantSeries ? ` S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}` : ''), container(item.fileName), prettyTags(item.label + ' ' + item.fileName), detectLanguages(item.fileName)].filter(Boolean).join(' - ') + (item.size ? ' - ' + item.size : ''),
-      url: winner,
+      url: candidates[0],
       quality: tier,
       candidates: candidates.slice(0, 5),
       referer: best.url
@@ -283,25 +282,29 @@ async function handleStreams(params) {
   return collectStreams(params);
 }
 
-// /play — re-resolve LIVE at play-time so the chosen mirror was verified
-// seconds ago, then proxy it with Range support. idx selects which entry.
-async function handlePlay(res, params) {
+// /play — proxy candidates directly at play-time (no quota-burning probes).
+// The proxy attempt itself is the validity check: video pipes through,
+// 403/HTML candidates are skipped for the next one.
+async function handlePlay(res, params, rangeHeader) {
   const idx = parseInt(params.get('idx') || '0');
   const { streams } = await collectStreams(params);
   const entry = streams[idx];
   if (!entry) return jres(res, { error: 'no such stream at play-time' }, 404);
 
   const referer = entry.referer;
-  const rangeHeader = params.get('_range') || '';
+  const tryUrls = [entry.url, ...entry.candidates.filter(c => c !== entry.url)];
 
-  for (const url of [entry.url, ...entry.candidates]) {
+  for (const url of tryUrls) {
     try {
       const h = { 'User-Agent': UA };
       if (referer) h['Referer'] = referer;
       if (rangeHeader) h['Range'] = rangeHeader;
       const upstream = await fetch(url, { headers: h });
       const ct = upstream.headers.get('content-type') || '';
-      if (upstream.status >= 400 || /text\/html/i.test(ct)) continue;
+      if (upstream.status >= 400 || /text\/html/i.test(ct)) {
+        console.log('[play] skip', upstream.status, ct.slice(0, 30), url.slice(0, 70));
+        continue;
+      }
 
       const headers = {};
       ['content-type', 'content-length', 'content-disposition', 'accept-ranges', 'content-range'].forEach(hh => {
@@ -326,7 +329,7 @@ const server = http.createServer(async (req, res) => {
       const out = await handleStreams(p);
       jres(res, out);
     } else if (url.pathname === '/play') {
-      await handlePlay(res, p);
+      await handlePlay(res, p, req.headers['range']);
     } else if (url.pathname === '/') {
       jres(res, { ok: true, endpoints: ['/streams', '/play'] });
     } else {
